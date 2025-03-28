@@ -1,6 +1,6 @@
 # Confidential Prompting
 
-This repository provides a proof-of-concept (PoC) implementation of Secure Multi-Party Decoding (SMD) and Prompt Obfuscation (PO) for confidential prompting, as described in the paper [Confidential Prompting: Protecting User Prompts from Cloud LLM Providers](https://arxiv.org/abs/2409.19134).
+This repository provides a proof-of-concept (PoC) implementation of Secure Partitioned Decoding (SPD) and Prompt Obfuscation (PO) for confidential prompting.
 
 ## Overview
 
