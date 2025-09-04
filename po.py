@@ -207,7 +207,7 @@ def prefill(
     public_meta = PublicMeta(
         gamma=gamma,
         len_public=len(public_token_ids),
-        initial_token_ids=[tokenizer.encode(" ")[-1]] * gamma,
+        initial_token_ids=[(tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.encode(" ")[-1])] * gamma,
         pos_offset=max(all_pos_ids),
         path="public.safetensors"
     )
@@ -261,7 +261,7 @@ def prefill(
 def main(prompt:str,
          gamma: int = 5,
          epsilon: float = 0.1,
-         temperatue: float = 1.0,
+         temperature: float = 1.0,
          prob_dist:str = "abs",
          model="meta-llama/Llama-3.2-3B-Instruct",
          device="cuda:0",
@@ -279,7 +279,7 @@ def main(prompt:str,
         prompt=prompt,
         gamma=gamma,
         epsilon=epsilon,
-        temperature=temperatue,
+        temperature=temperature,
         prob_dist=prob_dist,
         state_dir=states_dir,
         model_path=model,

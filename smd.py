@@ -160,7 +160,7 @@ def init_master(
             position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
-            confidential=True
+            confidential=True  # Bật lại để debug private attention
         )
         
         # sample from logits

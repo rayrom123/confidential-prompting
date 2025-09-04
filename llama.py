@@ -79,7 +79,7 @@ class LlamaRMSNorm(nn.Module):
 
     def forward(self, hidden_states):
         input_dtype = hidden_states.dtype
-        hidden_states = hidden_states.to(torch.float32)
+        hidden_states = hidden_states.float()
         variance = hidden_states.pow(2).mean(-1, keepdim=True)
         hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
         return self.weight * hidden_states.to(input_dtype)
@@ -260,6 +260,8 @@ class LlamaAttention(nn.Module):
 
     ) -> torch.Tensor:
 
+        original_dtype = hidden_states.dtype
+        hidden_states = hidden_states.float()
         bsz, q_len, _ = hidden_states.size()
 
         query_states = self.q_proj(hidden_states)
@@ -313,7 +315,7 @@ class LlamaAttention(nn.Module):
         attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
 
         attn_output = self.o_proj(attn_output)
-        return attn_output
+        return attn_output.to(original_dtype)
 
 def softmax(x: torch.Tensor, dim: int):
     m = torch.max(x, dim=dim, keepdim=True).values
@@ -341,10 +343,12 @@ class ConfidentialLlamaAttention(LlamaAttention):
             ):
         
         logger.start_measure()
+        original_dtype = hidden_states.dtype
+        hidden_states = hidden_states.float()
         bsz, q_len, _ = hidden_states.size()
 
         if self.pvt_buffer is None:
-            self.pvt_buffer = torch.empty((bsz, self.num_heads, 1, self.head_dim + 2), dtype=torch.half)
+            self.pvt_buffer = torch.empty((bsz, self.num_heads, 1, self.head_dim + 2), dtype=torch.float)
             self.pvt_buffer_gpu = torch.empty_like(self.pvt_buffer, device=buffer.device)
 
         q_new = self.q_proj(hidden_states)
@@ -365,7 +369,7 @@ class ConfidentialLlamaAttention(LlamaAttention):
         # print('v_new', v_new.shape)
 
         q_new = apply_rotary_pos_emb1(q_new, cos, sin, position_ids)
-        q_new_cpu = q_new.half().cpu()
+        q_new_cpu = q_new.float().cpu()
         
         
         works = []
@@ -470,7 +474,7 @@ class ConfidentialLlamaAttention(LlamaAttention):
         logger.log_measure('o_projection')
         #exit()
         
-        return attn
+        return attn.to(original_dtype)
 
 
 class LlamaDecoderLayer(nn.Module):

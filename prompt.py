@@ -144,10 +144,13 @@ class Prompt:
         
         tag = target.tag if target.tag is not None else 'word'
         
-        prompt = textwrap.dedent(f"""
-            Your task is to guess the redacted [TARGET], which is {tag}, in the following sentence:\n\n
-            <sentence>{re.sub(r'\s{2,}', ' ', ' '.join(result))}</sentence>\n\n
-            One possible {tag} that fits in to [TARGET] is:""")
+        prompt = textwrap.dedent(
+            "Your task is to guess the redacted [TARGET], which is {}, in the following sentence:\n\n"
+            "<sentence>{}</sentence>\n\n"
+            "One possible {} that fits in to [TARGET] is:".format(
+                tag, re.sub(r'\s{2,}', ' ', ' '.join(result)), tag
+            )
+        )
         
         return prompt
 
