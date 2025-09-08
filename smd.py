@@ -37,7 +37,8 @@ class AttentionVault:
     gamma: int
     attention_mask: torch.Tensor
 
-    def __init__(self, buffer: AttentionBuffer, gamma: int, attention_mask: torch.Tensor, num_group: int, use_nccl: bool = False):
+    def __init__(self, buffer: AttentionBuffer, gamma: int, attention_mask: torch.Tensor, num_group: int, use_nccl: bool = False,
+                 freivalds: bool = False, freivalds_tol: float = 1e-4):
         self.kv_buffer = buffer
         self.num_layers = buffer.num_layers
         self.head_dim = buffer.head_dim
@@ -46,6 +47,14 @@ class AttentionVault:
         self.use_nccl = use_nccl
         self.q_buffer = torch.empty((gamma, self.num_heads * num_group, 1, self.head_dim), dtype=buffer.dtype, device=buffer.device if self.use_nccl else 'cpu')
         self.o_buffer = torch.empty((gamma, self.num_heads * num_group, 1, self.head_dim + 2), dtype=buffer.dtype, device=buffer.device if self.use_nccl else 'cpu')
+        # Freivalds buffers
+        self.freivalds_enabled = freivalds
+        self.freivalds_tol = freivalds_tol
+        if self.freivalds_enabled:
+            # random vector per head shared across gamma
+            self.r_buffer = torch.empty((self.num_heads * num_group, self.head_dim), dtype=buffer.dtype, device=buffer.device if self.use_nccl else 'cpu')
+            # server-provided projection y = Q @ r, shape (gamma, heads, 1)
+            self.y_buffer = torch.empty((gamma, self.num_heads * num_group, 1), dtype=buffer.dtype, device=buffer.device if self.use_nccl else 'cpu')
 
         self.gamma = gamma
         # invert mask
@@ -62,8 +71,17 @@ class AttentionVault:
         #print('.', end='', flush=True)
 
         for i in range(self.num_layers):
+            # Optional Freivalds challenge: send r, then receive Q and y
+            if self.freivalds_enabled:
+                self.r_buffer.uniform_(-1.0, 1.0)
+                torch.distributed.send(self.r_buffer.contiguous(), 0)
+
             # receive Q state synchronously
-            torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
+            torch.distributed.recv(self.q_buffer, 0) # [n=gamma, h, q=1, d]
+
+            if self.freivalds_enabled:
+                # receive server-computed projection y = Q @ r
+                torch.distributed.recv(self.y_buffer, 0)
 
             # compute local attention
             # (n, h, 1, d) -> (1, h, n, d)
@@ -82,6 +100,17 @@ class AttentionVault:
             attn_pvt = torch.matmul(score_pvt, v_pvt)
 
             o_buffer = torch.cat([max_pvt, sum_pvt, attn_pvt], dim=-1)
+
+            # Verify Freivalds projection if enabled
+            if self.freivalds_enabled:
+                # Compute local projection: (gamma, heads, 1, d) @ (heads, d) -> (gamma, heads, 1)
+                # Broadcast r over gamma and query length 1
+                r = self.r_buffer.to(q_new.device)
+                y_check = (q_new * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
+                # Compare with received y
+                y_srv = self.y_buffer.to(q_new.device)
+                if not torch.allclose(y_check, y_srv, atol=self.freivalds_tol, rtol=0):
+                    raise RuntimeError("Freivalds check failed for Q: communication or integrity error detected.")
 
             if self.use_nccl:
                 torch.distributed.send(o_buffer.contiguous(), 0)
@@ -110,7 +139,8 @@ def init_master(
     num_users:int=1,
     capacity:int = 1024 * 2,
     timeout_sec:int = 15,
-    print_idx:int=0 # 0 means the original prompt. 1=first fake prompt, 2=second fake prompt, etc.
+    print_idx:int=0, # 0 means the original prompt. 1=first fake prompt, 2=second fake prompt, etc.
+    freivalds:bool=False
     ):
     # load meta
     
@@ -160,7 +190,8 @@ def init_master(
             position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
-            confidential=True  # Bật lại để debug private attention
+            confidential=True,  # Bật lại để debug private attention
+            freivalds=freivalds
         )
         
         # sample from logits
@@ -198,6 +229,8 @@ def init_worker(
     user_id:int = 0,
     timeout_sec:int = 15,
     disable_multiplexing:bool = False,
+    freivalds:bool = False,
+    freivalds_tol:float = 1e-4,
     ):
     # load private metadata pickle
     
@@ -274,7 +307,8 @@ def init_worker(
     if mask is not None:
         mask = torch.as_tensor(mask, device=device)
 
-    vault = AttentionVault(buffer_private, meta.gamma, mask, num_group=config.num_attention_heads // config.num_key_value_heads)
+    vault = AttentionVault(buffer_private, meta.gamma, mask, num_group=config.num_attention_heads // config.num_key_value_heads,
+                           freivalds=freivalds, freivalds_tol=freivalds_tol)
 
     # print memory consumption in MB.
     print(f"Worker {user_id} memory consumption: {buffer_private.memory_consumption() / 1024 / 1024:.2f} MB")
@@ -301,16 +335,18 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
          standalone_worker:bool=False,
          user_id:int=0,
          print_idx:int=0,
-         disable_multiplexing:bool=False
+         disable_multiplexing:bool=False,
+         freivalds:bool=False,
+         freivalds_tol:float=1e-4
          ):
     
     
     if standalone_master:
-        init_master(states_dir, model, device, num_users, max_num_tokens, timeout_sec, print_idx)
+        init_master(states_dir, model, device, num_users, max_num_tokens, timeout_sec, print_idx, freivalds)
         return 
     
     if standalone_worker:
-        init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing)
+        init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing, freivalds, freivalds_tol)
         return
     
         # List to store the processes
@@ -324,7 +360,9 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
             'num_users': num_users,
             'user_id': i,
             'timeout_sec': timeout_sec,
-            'disable_multiplexing': disable_multiplexing
+            'disable_multiplexing': disable_multiplexing,
+            'freivalds': freivalds,
+            'freivalds_tol': freivalds_tol
             })
         p.start()
         processes.append(p)
@@ -336,7 +374,8 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
         'num_users': num_users,
         'capacity': max_num_tokens,
         'timeout_sec': timeout_sec,
-        'print_idx': print_idx
+        'print_idx': print_idx,
+        'freivalds': freivalds
     })
     server_process.start()
     processes.append(server_process)
