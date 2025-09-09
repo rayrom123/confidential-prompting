@@ -373,7 +373,14 @@ class ConfidentialLlamaAttention(LlamaAttention):
         
         
         works = []
-        if confidential:
+        if confidential and torch.distributed.is_initialized():
+            print(f"🔄 [Master] Starting confidential attention with distributed communication")
+            print(f"  - Distributed initialized: {torch.distributed.is_initialized()}")
+            print(f"  - Current rank: {torch.distributed.get_rank()}")
+            print(f"  - World size: {torch.distributed.get_world_size()}")
+            print(f"  - Number of users: {num_users}")
+            print(f"  - Batch per user: {bsz // num_users}")
+            
             # compute the private states asynchronously.
             # send before view() because send only works with contiguous tensors.
             # print(torch.sum(q_new))
@@ -400,6 +407,13 @@ class ConfidentialLlamaAttention(LlamaAttention):
                 works.append(work)
                 
             logger.log_measure('comm_overhead1')
+        else:
+            if confidential:
+                print(f"⚠️  [Master] Confidential mode requested but distributed not initialized!")
+                print(f"  - Distributed initialized: {torch.distributed.is_initialized()}")
+                print(f"  - Falling back to public attention only")
+            else:
+                print(f"ℹ️  [Master] Running in public attention mode (no distributed communication)")
             
         
         k_new = self.k_proj(hidden_states)
@@ -435,7 +449,7 @@ class ConfidentialLlamaAttention(LlamaAttention):
         
         attn_pub = torch.matmul(score_pub.to(q_new.dtype), v_pub)
         logger.log_measure('pub_attention')
-        if confidential:
+        if confidential and torch.distributed.is_initialized():
             # wait for the private states to be computed
             #
             

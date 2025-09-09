@@ -69,18 +69,27 @@ class AttentionVault:
     @torch.inference_mode()
     def serve(self):
         #print('.', end='', flush=True)
+        print(f"🔄 [Worker] Starting attention vault service")
+        print(f"  - Number of layers: {self.num_layers}")
+        print(f"  - Freivalds enabled: {self.freivalds_enabled}")
+        print(f"  - Freivalds tolerance: {self.freivalds_tol}")
 
         for i in range(self.num_layers):
+            print(f"  📡 [Worker] Processing layer {i+1}/{self.num_layers}")
+            
             # Optional Freivalds challenge: send r, then receive Q and y
             if self.freivalds_enabled:
+                print(f"    🔐 [Worker] Sending Freivalds challenge vector r for layer {i+1}")
                 self.r_buffer.uniform_(-1.0, 1.0)
                 torch.distributed.send(self.r_buffer.contiguous(), 0)
 
             # receive Q state synchronously
+            print(f"    📥 [Worker] Receiving Q tensor from master for layer {i+1}")
             torch.distributed.recv(self.q_buffer, 0) # [n=gamma, h, q=1, d]
 
             if self.freivalds_enabled:
                 # receive server-computed projection y = Q @ r
+                print(f"    📥 [Worker] Receiving Freivalds projection y from master for layer {i+1}")
                 torch.distributed.recv(self.y_buffer, 0)
 
             # compute local attention
@@ -103,6 +112,7 @@ class AttentionVault:
 
             # Verify Freivalds projection if enabled
             if self.freivalds_enabled:
+                print(f"    🔍 [Worker] Verifying Freivalds projection for layer {i+1}")
                 # Compute local projection: (gamma, heads, 1, d) @ (heads, d) -> (gamma, heads, 1)
                 # Broadcast r over gamma and query length 1
                 r = self.r_buffer.to(q_new.device)
@@ -110,8 +120,14 @@ class AttentionVault:
                 # Compare with received y
                 y_srv = self.y_buffer.to(q_new.device)
                 if not torch.allclose(y_check, y_srv, atol=self.freivalds_tol, rtol=0):
+                    print(f"    ❌ [Worker] Freivalds verification FAILED for layer {i+1}!")
+                    print(f"    - Tolerance: {self.freivalds_tol}")
+                    print(f"    - Max difference: {torch.max(torch.abs(y_check - y_srv)).item()}")
                     raise RuntimeError("Freivalds check failed for Q: communication or integrity error detected.")
+                else:
+                    print(f"    ✅ [Worker] Freivalds verification PASSED for layer {i+1}")
 
+            print(f"    📤 [Worker] Sending attention results to master for layer {i+1}")
             if self.use_nccl:
                 torch.distributed.send(o_buffer.contiguous(), 0)
             else:
@@ -140,7 +156,8 @@ def init_master(
     capacity:int = 1024 * 2,
     timeout_sec:int = 15,
     print_idx:int=0, # 0 means the original prompt. 1=first fake prompt, 2=second fake prompt, etc.
-    freivalds:bool=False
+    freivalds:bool=False,
+    standalone_master:bool=False
     ):
     # load meta
     
@@ -167,13 +184,30 @@ def init_master(
 
     #print('buffer size', buffer.size())
 
-    dist.init_process_group(
-        backend="gloo",
-        init_method="env://",
-        world_size=num_users + 1,
-        timeout=datetime.timedelta(seconds=timeout_sec),
-        rank=0
-    )
+    # Only initialize distributed when not running standalone
+    if not standalone_master:
+        print("Initializing distributed process group...")
+        print(f"  - Backend: gloo")
+        print(f"  - World size: {num_users + 1} (1 master + {num_users} workers)")
+        print(f"  - Master rank: 0")
+        print(f"  - Timeout: {timeout_sec} seconds")
+        
+        dist.init_process_group(
+            backend="gloo",
+            init_method="env://",
+            world_size=num_users + 1,
+            timeout=datetime.timedelta(seconds=timeout_sec),
+            rank=0
+        )
+        
+        print("✅ Distributed process group initialized successfully!")
+        print(f"  - Current rank: {dist.get_rank()}")
+        print(f"  - World size: {dist.get_world_size()}")
+        print(f"  - Backend: {dist.get_backend()}")
+    else:
+        print("🚫 Running in standalone mode - no distributed communication")
+        print("  - Distributed group: NOT initialized")
+        print("  - Confidential mode: DISABLED")
 
     token_ids = meta.initial_token_ids
     position_ids = [meta.pos_offset] * meta.gamma
@@ -190,7 +224,7 @@ def init_master(
             position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
-            confidential=True,  # Bật lại để debug private attention
+            confidential=not standalone_master,  # Only use confidential when not standalone
             freivalds=freivalds
         )
         
@@ -313,6 +347,12 @@ def init_worker(
     # print memory consumption in MB.
     print(f"Worker {user_id} memory consumption: {buffer_private.memory_consumption() / 1024 / 1024:.2f} MB")
 
+    print(f"Worker {user_id} initializing distributed process group...")
+    print(f"  - Backend: gloo")
+    print(f"  - World size: {num_users + 1} (1 master + {num_users} workers)")
+    print(f"  - Worker rank: {user_id + 1}")
+    print(f"  - Timeout: {timeout_sec} seconds")
+    
     dist.init_process_group(
         backend="gloo",
         init_method="env://",
@@ -320,6 +360,11 @@ def init_worker(
         timeout=datetime.timedelta(seconds=timeout_sec),
         rank=user_id + 1
     )
+    
+    print(f"✅ Worker {user_id} distributed process group initialized successfully!")
+    print(f"  - Current rank: {dist.get_rank()}")
+    print(f"  - World size: {dist.get_world_size()}")
+    print(f"  - Backend: {dist.get_backend()}")
 
     while True:
         vault.serve()
@@ -342,7 +387,7 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
     
     
     if standalone_master:
-        init_master(states_dir, model, device, num_users, max_num_tokens, timeout_sec, print_idx, freivalds)
+        init_master(states_dir, model, device, num_users, max_num_tokens, timeout_sec, print_idx, freivalds, standalone_master)
         return 
     
     if standalone_worker:
@@ -375,7 +420,8 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
         'capacity': max_num_tokens,
         'timeout_sec': timeout_sec,
         'print_idx': print_idx,
-        'freivalds': freivalds
+        'freivalds': freivalds,
+        'standalone_master': False
     })
     server_process.start()
     processes.append(server_process)
