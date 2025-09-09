@@ -399,6 +399,7 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
          max_num_tokens:int=2048,
          standalone_master:bool=False,
          standalone_worker:bool=False,
+         distributed_master:bool=False,
          user_id:int=0,
          print_idx:int=0,
          disable_multiplexing:bool=False,
@@ -413,6 +414,10 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
     
     if standalone_worker:
         init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing, freivalds, freivalds_tol)
+        return
+    
+    if distributed_master:
+        init_master(states_dir, model, device, num_users, max_num_tokens, timeout_sec, print_idx, freivalds, False)
         return
     
     # List to store the processes
