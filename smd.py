@@ -191,14 +191,14 @@ def init_master(
         print(f"  - World size: {num_users + 1} (1 master + {num_users} workers)")
         print(f"  - Master rank: 0")
         print(f"  - Timeout: {timeout_sec} seconds")
-        
-        dist.init_process_group(
-            backend="gloo",
-            init_method="env://",
-            world_size=num_users + 1,
-            timeout=datetime.timedelta(seconds=timeout_sec),
-            rank=0
-        )
+
+    dist.init_process_group(
+        backend="gloo",
+        init_method="env://",
+        world_size=num_users + 1,
+        timeout=datetime.timedelta(seconds=timeout_sec),
+        rank=0
+    )
         
         print("✅ Distributed process group initialized successfully!")
         print(f"  - Current rank: {dist.get_rank()}")
@@ -219,13 +219,24 @@ def init_master(
     printer = StreamPrinter()
     while True:
         
+        if standalone_master:
+            # Standalone mode: no distributed, no confidential, no freivalds
+            logits = model(
+                input_ids=torch.as_tensor(token_ids, device=device).unsqueeze(-1),
+                position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
+                buffer=buffer,
+                buffer_sink_ids=buffer_sink_ids,
+                confidential=False
+            )
+        else:
+            # Distributed mode: can use confidential and freivalds
         logits = model(
             input_ids=torch.as_tensor(token_ids, device=device).unsqueeze(-1),
             position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
-            confidential=not standalone_master,  # Only use confidential when not standalone
-            freivalds=freivalds
+                confidential=True,
+                freivalds=freivalds
         )
         
         # sample from logits
@@ -352,7 +363,7 @@ def init_worker(
     print(f"  - World size: {num_users + 1} (1 master + {num_users} workers)")
     print(f"  - Worker rank: {user_id + 1}")
     print(f"  - Timeout: {timeout_sec} seconds")
-    
+
     dist.init_process_group(
         backend="gloo",
         init_method="env://",
