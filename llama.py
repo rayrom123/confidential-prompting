@@ -390,20 +390,23 @@ class ConfidentialLlamaAttention(LlamaAttention):
                 
                 #print('send shape', q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user].shape)
                 #print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
-                # Freivalds handshake: receive r and send projection y=Q@r before sending Q
+                # Freivalds handshake: worker expects order => send Q first, then send y
                 if freivalds:
                     try:
                         r = torch.empty((self.num_heads, self.head_dim), dtype=torch.float32)
                         torch.distributed.recv(r, 1 + i)
-                        # project for this user's batch: shape (batch_per_user, heads, 1)
                         q_local = q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user]
+                        # 1) send Q to worker
+                        torch.distributed.isend(q_local, 1 + i)
+                        # 2) compute and send y = Q @ r
                         y = (q_local * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
                         torch.distributed.send(y.contiguous(), 1 + i)
                     except Exception as e:
                         print(f"    ⚠️ [Master] Freivalds handshake failed for user {i}: {e}")
-                        # Continue without Freivalds
-                        pass
-                torch.distributed.isend(q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
+                        # Fallback: still send Q so attention can proceed
+                        torch.distributed.isend(q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
+                else:
+                    torch.distributed.isend(q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
                 # print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
                 work = torch.distributed.irecv(self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
                 #works.append((work, time.time()))
