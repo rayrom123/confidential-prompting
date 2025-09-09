@@ -339,7 +339,8 @@ class ConfidentialLlamaAttention(LlamaAttention):
                 buffer_sink_ids: list[int] | None = None,
                 layer_id: int | None = 0,
                 confidential: bool = False,
-                num_users: int = 1
+                num_users: int = 1,
+                freivalds: bool = False
             ):
         
         logger.start_measure()
@@ -390,16 +391,18 @@ class ConfidentialLlamaAttention(LlamaAttention):
                 #print('send shape', q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user].shape)
                 #print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
                 # Freivalds handshake: receive r and send projection y=Q@r before sending Q
-                try:
-                    r = torch.empty((self.num_heads, self.head_dim), dtype=torch.float32)
-                    torch.distributed.recv(r, 1 + i)
-                    # project for this user's batch: shape (batch_per_user, heads, 1)
-                    q_local = q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user]
-                    y = (q_local * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
-                    torch.distributed.send(y.contiguous(), 1 + i)
-                except Exception:
-                    # If no Freivalds enabled on worker, fall back silently
-                    pass
+                if freivalds:
+                    try:
+                        r = torch.empty((self.num_heads, self.head_dim), dtype=torch.float32)
+                        torch.distributed.recv(r, 1 + i)
+                        # project for this user's batch: shape (batch_per_user, heads, 1)
+                        q_local = q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user]
+                        y = (q_local * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
+                        torch.distributed.send(y.contiguous(), 1 + i)
+                    except Exception as e:
+                        print(f"    ⚠️ [Master] Freivalds handshake failed for user {i}: {e}")
+                        # Continue without Freivalds
+                        pass
                 torch.distributed.isend(q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
                 # print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
                 work = torch.distributed.irecv(self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
@@ -518,7 +521,8 @@ class LlamaDecoderLayer(nn.Module):
             buffer_sink_ids: list[int] | None = None,
             layer_id: int | None = 0,
             confidential: bool = False,
-            num_users: int = 1
+            num_users: int = 1,
+            freivalds: bool = False
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -533,7 +537,8 @@ class LlamaDecoderLayer(nn.Module):
             buffer_sink_ids=buffer_sink_ids,
             layer_id=layer_id,
             confidential=confidential,
-            num_users=num_users
+            num_users=num_users,
+            freivalds=freivalds
         )
         hidden_states = residual + hidden_states
 
@@ -618,6 +623,7 @@ class LlamaModel(LlamaPreTrainedModel):
             buffer_sink_ids: list[int] | None = None,
             confidential: bool = False,
             num_users: int = 1,
+            freivalds: bool = False,
     ) -> torch.Tensor:
         batch_size, seq_length = input_ids.shape
 
@@ -664,7 +670,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 buffer_sink_ids=buffer_sink_ids,
                 layer_id=idx,
                 confidential=confidential,
-                num_users=num_users
+                num_users=num_users,
+                freivalds=freivalds
             )
 
             hidden_states = layer_outputs
@@ -713,6 +720,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             buffer_sink_ids: list[int] | None = None,
             confidential: bool = False,
             num_users: int = 1,
+            freivalds: bool = False,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
@@ -721,7 +729,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
             confidential=confidential,
-            num_users=num_users
+            num_users=num_users,
+            freivalds=freivalds
         )
 
         global executor

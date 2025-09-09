@@ -52,9 +52,12 @@ def prefill(
     num_intervals = 1.0 / epsilon
     replacements = {}
 
-    for sampling_prompt, target in prompt.get_all_ar_sampling_prompts():
-        
-        #print(sampling_prompt, target.text)
+    sampling_prompts = list(prompt.get_all_ar_sampling_prompts())
+    print(f"Found {len(sampling_prompts)} sampling prompts")
+    
+    for i, (sampling_prompt, target) in enumerate(sampling_prompts):
+        print(f"Processing prompt {i+1}: {sampling_prompt}")
+        print(f"Target text: {target.text}")
         
         samples = sampler.sample(gamma * 2, sampling_prompt, target.text, num_intervals=num_intervals, dist=prob_dist)
         
@@ -64,8 +67,12 @@ def prefill(
         
         if verbose:
             print(f"Sampled for {target.text}: {samples}")
+        print(f"Generated {len(samples)} samples for {target.text}")
 
     # adjust gamma
+    if not replacements:
+        raise ValueError("No replacements found. Please check your input prompt and ensure it contains <redacted> tags.")
+    
     gamma = len(replacements[list(replacements.keys())[0]])
 
     mask_info = []
