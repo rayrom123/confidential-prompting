@@ -113,19 +113,29 @@ class AttentionVault:
             # Verify Freivalds projection if enabled
             if self.freivalds_enabled:
                 print(f"    🔍 [Worker] Verifying Freivalds projection for layer {i+1}")
-                # Compute local projection: (gamma, heads, 1, d) @ (heads, d) -> (gamma, heads, 1)
-                # Broadcast r over gamma and query length 1
-                r = self.r_buffer.to(q_new.device)
-                y_check = (q_new * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
-                # Compare with received y
-                y_srv = self.y_buffer.to(q_new.device)
-                if not torch.allclose(y_check, y_srv, atol=self.freivalds_tol, rtol=0):
-                    print(f"    ❌ [Worker] Freivalds verification FAILED for layer {i+1}!")
-                    print(f"    - Tolerance: {self.freivalds_tol}")
-                    print(f"    - Max difference: {torch.max(torch.abs(y_check - y_srv)).item()}")
-                    raise RuntimeError("Freivalds check failed for Q: communication or integrity error detected.")
-                else:
-                    print(f"    ✅ [Worker] Freivalds verification PASSED for layer {i+1}")
+                try:
+                    # Compute local projection: (gamma, heads, 1, d) @ (heads, d) -> (gamma, heads, 1)
+                    # Broadcast r over gamma and query length 1
+                    r = self.r_buffer.to(q_new.device)
+                    y_check = (q_new * r.unsqueeze(0).unsqueeze(2)).sum(dim=-1)
+                    # Compare with received y
+                    y_srv = self.y_buffer.to(q_new.device)
+                    
+                    print(f"    - y_check shape: {y_check.shape}")
+                    print(f"    - y_srv shape: {y_srv.shape}")
+                    print(f"    - y_check sample: {y_check[0, 0, 0].item()}")
+                    print(f"    - y_srv sample: {y_srv[0, 0, 0].item()}")
+                    
+                    if not torch.allclose(y_check, y_srv, atol=self.freivalds_tol, rtol=0):
+                        print(f"    ❌ [Worker] Freivalds verification FAILED for layer {i+1}!")
+                        print(f"    - Tolerance: {self.freivalds_tol}")
+                        print(f"    - Max difference: {torch.max(torch.abs(y_check - y_srv)).item()}")
+                        raise RuntimeError("Freivalds check failed for Q: communication or integrity error detected.")
+                    else:
+                        print(f"    ✅ [Worker] Freivalds verification PASSED for layer {i+1}")
+                except Exception as e:
+                    print(f"    ❌ [Worker] Freivalds verification ERROR for layer {i+1}: {e}")
+                    raise
 
             print(f"    📤 [Worker] Sending attention results to master for layer {i+1}")
             if self.use_nccl:
@@ -405,7 +415,7 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
         init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing, freivalds, freivalds_tol)
         return
     
-        # List to store the processes
+    # List to store the processes
     processes = []
     
     for i in range(num_users):
