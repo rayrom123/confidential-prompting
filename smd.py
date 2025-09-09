@@ -192,13 +192,13 @@ def init_master(
         print(f"  - Master rank: 0")
         print(f"  - Timeout: {timeout_sec} seconds")
 
-    dist.init_process_group(
-        backend="gloo",
-        init_method="env://",
-        world_size=num_users + 1,
-        timeout=datetime.timedelta(seconds=timeout_sec),
-        rank=0
-    )
+        dist.init_process_group(
+            backend="gloo",
+            init_method="env://",
+            world_size=num_users + 1,
+            timeout=datetime.timedelta(seconds=timeout_sec),
+            rank=0
+        )
         
         print("✅ Distributed process group initialized successfully!")
         print(f"  - Current rank: {dist.get_rank()}")
