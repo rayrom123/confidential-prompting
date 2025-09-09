@@ -230,14 +230,14 @@ def init_master(
             )
         else:
             # Distributed mode: can use confidential and freivalds
-        logits = model(
-            input_ids=torch.as_tensor(token_ids, device=device).unsqueeze(-1),
-            position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
-            buffer=buffer,
-            buffer_sink_ids=buffer_sink_ids,
+            logits = model(
+                input_ids=torch.as_tensor(token_ids, device=device).unsqueeze(-1),
+                position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
+                buffer=buffer,
+                buffer_sink_ids=buffer_sink_ids,
                 confidential=True,
                 freivalds=freivalds
-        )
+            )
         
         # sample from logits
         last_token_logits = logits[:, -1, :]
