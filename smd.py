@@ -72,15 +72,15 @@ class AttentionVault:
             C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
 
             # Adjust the size of the random vector r to match the dimensions of B
-            n = B.shape[1]  # Number of columns in B
-            r = np.random.randint(0, 2, size=(n, 1))
+            _, _, _, d = B.shape  # Get the last dimension size of B
+            r = np.random.randint(0, 2, size=(d, 1))
 
             # Compute Br and Cr
-            Br = np.dot(B, r)
-            Cr = np.dot(C, r)
+            Br = np.dot(B.reshape(-1, d), r).reshape(B.shape[:-1])
+            Cr = np.dot(C.reshape(-1, d), r).reshape(C.shape[:-1])
 
             # Compute A(Br)
-            ABr = np.dot(A, Br)
+            ABr = np.dot(A.reshape(-1, d), Br.reshape(-1, 1)).reshape(A.shape[:-1])
 
             # Check if ABr equals Cr
             if not np.array_equal(ABr, Cr):
