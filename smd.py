@@ -75,12 +75,25 @@ class AttentionVault:
             _, _, _, d = B.shape  # Get the last dimension size of B
             r = np.random.randint(0, 2, size=(d, 1))
 
+            # Log the dimensions of A, B, C, and r
+            print(f"Dimensions of A: {A.shape}")
+            print(f"Dimensions of B: {B.shape}")
+            print(f"Dimensions of C: {C.shape}")
+            print(f"Dimensions of r: {r.shape}")
+
             # Compute Br and Cr
             Br = np.dot(B.reshape(-1, d), r).reshape(B.shape[:-1])
             Cr = np.dot(C.reshape(-1, d), r).reshape(C.shape[:-1])
 
+            # Log the results of Br and Cr
+            print(f"Br: {Br}")
+            print(f"Cr: {Cr}")
+
             # Compute A(Br)
             ABr = np.dot(A.reshape(-1, d), Br.reshape(-1, 1)).reshape(A.shape[:-1])
+
+            # Log the result of ABr
+            print(f"ABr: {ABr}")
 
             # Check if ABr equals Cr
             if not np.array_equal(ABr, Cr):
