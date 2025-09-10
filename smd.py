@@ -20,6 +20,7 @@ from attention import AttentionBuffer
 from llama import LlamaForCausalLM, softmax
 from prompt import PublicMeta, PrivateMeta, Replacement
 import logger 
+from freivalds import freivalds_algorithm
 
 #os.environ['MASTER_ADDR'] = 'localhost'
 #os.environ['MASTER_PORT'] = '29501'
@@ -64,6 +65,14 @@ class AttentionVault:
         for i in range(self.num_layers):
             # receive Q state synchronously
             torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
+
+            # Verify the integrity of the received Q using Freivalds' algorithm
+            A = self.q_buffer.cpu().numpy()  # Convert to numpy for Freivalds
+            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()  # k_pvt
+            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+
+            if not freivalds_algorithm(A, B, C):
+                raise ValueError("Integrity check failed for the query tensor Q.")
 
             # compute local attention
             # (n, h, 1, d) -> (1, h, n, d)
