@@ -62,42 +62,39 @@ class AttentionVault:
     def serve(self):
         for i in range(self.num_layers):
             # receive Q state synchronously
-            torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
+            torch.distributed.recv(self.q_buffer, 0) # [n, h, 1, d]
 
             # Verify the integrity of the received Q using Freivalds' algorithm
+            # A @ B.T @ r == C @ r
             A = self.q_buffer.cpu().numpy()
             B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
             
-            # Calculate C = A @ B_transposed
-            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+            # Calculate C (the expected result)
+            C_expected = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
             
-            # Reshape matrices for batched matrix multiplication check
-            # A_batched: (n*h, 1, d)
-            # B_batched: (n*h, kv_seq_len, d)
-            # C_batched: (n*h, 1, kv_seq_len)
-            A_batched = A.reshape(-1, A.shape[2], A.shape[3])
-            B_batched = B.reshape(-1, B.shape[2], B.shape[3])
-            C_batched = C.reshape(-1, C.shape[2], C.shape[3])
-
-            # Generate a random vector r with size matching the inner dimension of the matrices
-            # r must have a size that can be multiplied by C_batched
-            # C_batched is (n*h, 1, kv_seq_len), so r must be (kv_seq_len, 1)
-            kv_seq_len = B.shape[2]
+            # Get dimensions for the random vector r
+            # C_expected has shape (n, h, 1, kv_seq_len)
+            # r needs to have shape (kv_seq_len, 1)
+            kv_seq_len = C_expected.shape[3]
             r = np.random.randint(0, 2, size=(kv_seq_len, 1))
 
-            # Check: A @ B.T @ r == C @ r
-            # Left side:
-            # B.T @ r -> (n*h, d, kv_seq_len) @ (kv_seq_len, 1) -> (n*h, d, 1)
-            # A @ (B.T @ r) -> (n*h, 1, d) @ (n*h, d, 1) -> (n*h, 1, 1)
-            B_transposed_batched = B_batched.transpose(0, 2, 1)
-            Br = np.matmul(B_transposed_batched, r)
-            ABr = np.matmul(A_batched, Br)
+            # Perform the Freivalds' check
+            
+            # Calculate the right side of the equation: C @ r
+            # Shapes: (n, h, 1, kv_seq_len) @ (kv_seq_len, 1) -> (n, h, 1, 1)
+            Cr = np.matmul(C_expected, r)
 
-            # Right side:
-            # C @ r -> (n*h, 1, kv_seq_len) @ (kv_seq_len, 1) -> (n*h, 1, 1)
-            Cr = np.matmul(C_batched, r)
+            # Calculate the left side of the equation: A @ B.T @ r
+            # Step 1: B.T @ r
+            # Shapes: (n, h, d, kv_seq_len) @ (kv_seq_len, 1) -> (n, h, d, 1)
+            B_transposed = B.transpose(0, 1, 3, 2)
+            Br = np.matmul(B_transposed, r)
+            
+            # Step 2: A @ (B.T @ r)
+            # Shapes: (n, h, 1, d) @ (n, h, d, 1) -> (n, h, 1, 1)
+            ABr = np.matmul(A, Br)
 
-            # Compare results
+            # Check for equality using a tolerance for floating-point numbers
             if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
                 raise ValueError("Integrity check failed for the query tensor Q.")
             print(f"Integrity check for layer {i} passed.")
