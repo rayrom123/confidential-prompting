@@ -60,67 +60,67 @@ class AttentionVault:
 
     @torch.inference_mode()
     def serve(self):
-    for i in range(self.num_layers):
-        # receive Q state synchronously
-        torch.distributed.recv(self.q_buffer, 0)
+        for i in range(self.num_layers):
+            # receive Q state synchronously
+            torch.distributed.recv(self.q_buffer, 0)
 
-        # Verify the integrity of the received Q using Freivalds' algorithm
-        A = self.q_buffer.cpu().numpy()
-        B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
+            # Verify the integrity of the received Q using Freivalds' algorithm
+            A = self.q_buffer.cpu().numpy()
+            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
 
-        # Reshape matrices for Freivalds' algorithm
-        # A: (n, h, 1, d) -> (n*h, d)
-        # B: (n, h, kv_seq_len, d) -> (n*h, kv_seq_len, d) -> (n*h*kv_seq_len, d)
-        A_flat = A.reshape(-1, A.shape[-1])
+            # Reshape matrices for Freivalds' algorithm
+            # A: (n, h, 1, d) -> (n*h, d)
+            # B: (n, h, kv_seq_len, d) -> (n*h, kv_seq_len, d) -> (n*h*kv_seq_len, d)
+            A_flat = A.reshape(-1, A.shape[-1])
 
-        # We must transpose B so that its inner dimensions align with A's
-        B_transposed = B.transpose(0, 1, 3, 2)
-        # B_transposed: (n, h, d, kv_seq_len) -> (n*h*d, kv_seq_len)
-        B_flat = B_transposed.reshape(-1, B_transposed.shape[-1])
+            # We must transpose B so that its inner dimensions align with A's
+            B_transposed = B.transpose(0, 1, 3, 2)
+            # B_transposed: (n, h, d, kv_seq_len) -> (n*h*d, kv_seq_len)
+            B_flat = B_transposed.reshape(-1, B_transposed.shape[-1])
 
-        # C_flat must be calculated correctly from the reshaped A and B
-        # The true calculation is A @ B.T
-        # Reshaping A and B into 2D matrices is a bit complex.
-        # A_flat: (n*h, d)
-        # B_flat_for_matmul: (d, n*h*kv_seq_len)
-        # We need to reshape B into (d, n*h*kv_seq_len)
-        B_flat_for_matmul = B.transpose(3, 0, 1, 2).reshape(self.head_dim, -1)
-        C_flat = np.matmul(A_flat, B_flat_for_matmul) / math.sqrt(self.head_dim)
+            # C_flat must be calculated correctly from the reshaped A and B
+            # The true calculation is A @ B.T
+            # Reshaping A and B into 2D matrices is a bit complex.
+            # A_flat: (n*h, d)
+            # B_flat_for_matmul: (d, n*h*kv_seq_len)
+            # We need to reshape B into (d, n*h*kv_seq_len)
+            B_flat_for_matmul = B.transpose(3, 0, 1, 2).reshape(self.head_dim, -1)
+            C_flat = np.matmul(A_flat, B_flat_for_matmul) / math.sqrt(self.head_dim)
 
-        # Freivalds' algorithm works with matrices M, N and P where MN = P.
-        # Let's verify: (A) @ (B_transposed) == C.
-        # To make it work, let's use the original A, B and C matrices,
-        # and reshape the random vector r instead.
+            # Freivalds' algorithm works with matrices M, N and P where MN = P.
+            # Let's verify: (A) @ (B_transposed) == C.
+            # To make it work, let's use the original A, B and C matrices,
+            # and reshape the random vector r instead.
 
-        r = np.random.randint(0, 2, size=(B.shape[2], 1))
-        # B: (n, h, kv_seq_len, d), r: (kv_seq_len, 1)
-        # B @ r will fail because shapes don't align.
-        # Let's reshape B and r to make it work.
-        B_reshaped = B.reshape(-1, B.shape[2], B.shape[3]) # (n*h, kv_seq_len, d)
-        Cr = np.matmul(C.reshape(-1, C.shape[2]), r) # This line will likely fail as C is not defined this way
-        
-        # A more robust approach:
-        # 1. Compute C on the fly for verification.
-        A_numpy = self.q_buffer.cpu().numpy()
-        k_numpy = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
+            r = np.random.randint(0, 2, size=(B.shape[2], 1))
+            # B: (n, h, kv_seq_len, d), r: (kv_seq_len, 1)
+            # B @ r will fail because shapes don't align.
+            # Let's reshape B and r to make it work.
+            B_reshaped = B.reshape(-1, B.shape[2], B.shape[3]) # (n*h, kv_seq_len, d)
+            Cr = np.matmul(C.reshape(-1, C.shape[2]), r) # This line will likely fail as C is not defined this way
+            
+            # A more robust approach:
+            # 1. Compute C on the fly for verification.
+            A_numpy = self.q_buffer.cpu().numpy()
+            k_numpy = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
 
-        # Reshape for efficient batched matrix multiplication
-        # A_reshaped: (n*h, 1, d)
-        # k_reshaped: (n*h, kv_seq_len, d)
-        A_reshaped = A_numpy.reshape(-1, A_numpy.shape[2], A_numpy.shape[3])
-        k_reshaped = k_numpy.reshape(-1, k_numpy.shape[2], k_numpy.shape[3])
+            # Reshape for efficient batched matrix multiplication
+            # A_reshaped: (n*h, 1, d)
+            # k_reshaped: (n*h, kv_seq_len, d)
+            A_reshaped = A_numpy.reshape(-1, A_numpy.shape[2], A_numpy.shape[3])
+            k_reshaped = k_numpy.reshape(-1, k_numpy.shape[2], k_numpy.shape[3])
 
-        C_expected = np.matmul(A_reshaped, k_reshaped.transpose(0, 2, 1)) / math.sqrt(self.head_dim)
+            C_expected = np.matmul(A_reshaped, k_reshaped.transpose(0, 2, 1)) / math.sqrt(self.head_dim)
 
-        r = np.random.randint(0, 2, size=(C_expected.shape[2], 1))
-        
-        Cr = np.matmul(C_expected, r)
-        
-        ABr = np.matmul(A_reshaped, np.matmul(k_reshaped.transpose(0, 2, 1), r))
+            r = np.random.randint(0, 2, size=(C_expected.shape[2], 1))
+            
+            Cr = np.matmul(C_expected, r)
+            
+            ABr = np.matmul(A_reshaped, np.matmul(k_reshaped.transpose(0, 2, 1), r))
 
-        if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
-            raise ValueError("Integrity check failed for the query tensor Q.")
-        print(f"Integrity check for layer {i} passed.")
+            if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
+                raise ValueError("Integrity check failed for the query tensor Q.")
+            print(f"Integrity check for layer {i} passed.")
 
 class StreamPrinter:
 
