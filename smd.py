@@ -88,8 +88,14 @@ class AttentionVault:
 
             # receive Q state synchronously
             print(f"    📥 [Worker] Receiving Q tensor from master for layer {i+1}")
-            torch.distributed.recv(self.q_buffer, 0) # [n=gamma, h, q=1, d]
+            # Create temporary buffer with float32 dtype for receiving
+            q_temp = torch.empty_like(self.q_buffer, dtype=torch.float32)
+            torch.distributed.recv(q_temp, 0) # [n=gamma, h, q=1, d]
+            # Convert to expected dtype and copy to q_buffer
+            self.q_buffer.copy_(q_temp.to(self.q_buffer.dtype))
             if self.debug_checks:
+                print(f"    - Q received dtype: {q_temp.dtype} -> {self.q_buffer.dtype}")
+                print(f"    - Q shape: {self.q_buffer.shape}")
                 assert self.q_buffer.shape[0] == self.gamma if hasattr(self, 'gamma') else True
                 assert self.q_buffer.shape[1] == self.num_heads * self.num_group, f"Q heads mismatch: {self.q_buffer.shape}"
                 assert self.q_buffer.shape[2] == 1 and self.q_buffer.shape[3] == self.head_dim, f"Q last dims mismatch: {self.q_buffer.shape}"
@@ -97,7 +103,11 @@ class AttentionVault:
             if self.freivalds_enabled:
                 # receive server-computed projection y = Q @ r
                 print(f"    📥 [Worker] Receiving Freivalds projection y from master for layer {i+1}")
-                torch.distributed.recv(self.y_buffer, 0)
+                # Create temporary buffer with float32 dtype for receiving
+                y_temp = torch.empty_like(self.y_buffer, dtype=torch.float32)
+                torch.distributed.recv(y_temp, 0)
+                # Convert to expected dtype and copy to y_buffer
+                self.y_buffer.copy_(y_temp.to(self.y_buffer.dtype))
                 if self.debug_checks:
                     assert self.y_buffer.shape == (self.q_buffer.shape[0], self.q_buffer.shape[1], 1), f"y shape mismatch: {self.y_buffer.shape} vs Q {self.q_buffer.shape}"
 
