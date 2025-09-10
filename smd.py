@@ -62,44 +62,44 @@ class AttentionVault:
     def serve(self):
         for i in range(self.num_layers):
             # receive Q state synchronously
-            torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
+            torch.distributed.recv(self.q_buffer, 0)
 
             # Verify the integrity of the received Q using Freivalds' algorithm
             A = self.q_buffer.cpu().numpy()
             B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
             
-            # Calculate C = A @ B_transposed
-            # A: (n, h, 1, d)
-            # B: (n, h, kv_seq_len, d)
-            # B_transposed: (n, h, d, kv_seq_len)
-            # C: (n, h, 1, kv_seq_len)
-            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
-
-            # Reshape matrices to 2D for efficient matrix multiplication
-            # A_flat: (n*h, d)
-            # B_flat: (n*h*d, kv_seq_len)
-            # C_flat: (n*h, kv_seq_len)
+            # Reshape for Freivalds' algorithm.
+            # A: (n, h, 1, d) -> (n*h, d)
+            # B: (n, h, kv_seq_len, d) -> (n*h*kv_seq_len, d)
+            # C: (n, h, 1, kv_seq_len) -> (n*h, kv_seq_len)
             A_flat = A.reshape(-1, A.shape[-1])
-            B_transposed_flat = B.transpose(0, 1, 3, 2).reshape(-1, B.shape[2])
-            C_flat = C.reshape(-1, C.shape[-1])
+            B_flat = B.reshape(-1, B.shape[-1])
             
-            # Generate a random vector r with size matching the columns of B_transposed_flat
-            n_cols = B_transposed_flat.shape[1]
-            r = np.random.randint(0, 2, size=(n_cols, 1))
+            # We need to perform A @ B.T. The matrices must be reshaped accordingly.
+            # Let's compute C directly from the original matrices and then flatten C.
+            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+            C_flat = C.reshape(-1, C.shape[-1])
 
-            # Compute Br and Cr
-            Br = np.dot(B_transposed_flat, r)
-            Cr = np.dot(C_flat, r)
+            # The Freivalds' algorithm check is (A @ B) @ r == C @ r.
+            # Your original code computes (A_flat) @ (Br) where Br = B_flat @ r.
+            # This is where the alignment issue occurs. Let's fix that.
+            
+            # To align A_flat and B_transposed_flat, we must reshape B differently.
+            # We need to reshape B to (d, n*h*kv_seq_len) to align with A_flat(n*h, d)
+            B_transposed_aligned = B.transpose(3, 0, 1, 2).reshape(self.head_dim, -1)
+            
+            # Now, generate r with the correct number of rows.
+            r = np.random.randint(0, 2, size=(B_transposed_aligned.shape[1], 1))
 
-            # Compute A(Br)
-            ABr = np.dot(A_flat, Br)
+            # Re-verify with correctly shaped matrices.
+            AB_r = np.dot(np.dot(A_flat, B_transposed_aligned), r)
+            C_r = np.dot(C_flat, r)
 
-            # Check if ABr equals Cr, allowing for small floating-point errors
-            if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
+            if not np.allclose(AB_r, C_r, rtol=1e-5, atol=1e-8):
                 raise ValueError("Integrity check failed for the query tensor Q.")
             print(f"Integrity check for layer {i} passed.")
 
-            # Compute local attention
+            # Continue with local attention computation
             q_new = self.q_buffer.to(self.kv_buffer.device)
             k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)
 
