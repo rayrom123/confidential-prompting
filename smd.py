@@ -71,7 +71,19 @@ class AttentionVault:
             B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()  # k_pvt
             C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
 
-            if not freivalds_algorithm(A, B, C):
+            # Adjust the size of the random vector r to match the dimensions of B
+            n = B.shape[1]  # Number of columns in B
+            r = np.random.randint(0, 2, size=(n, 1))
+
+            # Compute Br and Cr
+            Br = np.dot(B, r)
+            Cr = np.dot(C, r)
+
+            # Compute A(Br)
+            ABr = np.dot(A, Br)
+
+            # Check if ABr equals Cr
+            if not np.array_equal(ABr, Cr):
                 raise ValueError("Integrity check failed for the query tensor Q.")
 
             # compute local attention
