@@ -65,39 +65,13 @@ class AttentionVault:
             torch.distributed.recv(self.q_buffer, 0) # [n, h, 1, d]
 
             # Verify the integrity of the received Q using Freivalds' algorithm
-            # A @ B.T @ r == C @ r
-            A = self.q_buffer.cpu().numpy()
-            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
-            
-            # Calculate C (the expected result)
-            C_expected = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
-            
-            # Get dimensions for the random vector r
-            # C_expected has shape (n, h, 1, kv_seq_len)
-            # r needs to have shape (kv_seq_len, 1)
-            kv_seq_len = C_expected.shape[3]
-            r = np.random.randint(0, 2, size=(kv_seq_len, 1))
+            A = self.q_buffer.cpu().numpy()  # Convert to numpy for Freivalds
+            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()  # k_pvt
+            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
 
-            # Perform the Freivalds' check
-            
-            # Calculate the right side of the equation: C @ r
-            # Shapes: (n, h, 1, kv_seq_len) @ (kv_seq_len, 1) -> (n, h, 1, 1)
-            Cr = np.matmul(C_expected, r)
-
-            # Calculate the left side of the equation: A @ B.T @ r
-            # Step 1: B.T @ r
-            # Shapes: (n, h, d, kv_seq_len) @ (kv_seq_len, 1) -> (n, h, d, 1)
-            B_transposed = B.transpose(0, 1, 3, 2)
-            Br = np.matmul(B_transposed, r)
-            
-            # Step 2: A @ (B.T @ r)
-            # Shapes: (n, h, 1, d) @ (n, h, d, 1) -> (n, h, 1, 1)
-            ABr = np.matmul(A, Br)
-
-            # Check for equality using a tolerance for floating-point numbers
-            if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
+            # Use Freivalds to check if A * B = C
+            if not freivalds_algorithm(A, B, C):
                 raise ValueError("Integrity check failed for the query tensor Q.")
-            print(f"Integrity check for layer {i} passed.")
 
             # Continue with local attention computation
             q_new = self.q_buffer.to(self.kv_buffer.device)
