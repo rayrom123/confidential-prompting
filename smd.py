@@ -38,7 +38,7 @@ class AttentionVault:
     attention_mask: torch.Tensor
 
     def __init__(self, buffer: AttentionBuffer, gamma: int, attention_mask: torch.Tensor, num_group: int, use_nccl: bool = False,
-                 freivalds: bool = False, freivalds_tol: float = 1e-4):
+                 freivalds: bool = False, freivalds_tol: float = 1e-4, debug_checks: bool = False):
         self.kv_buffer = buffer
         self.num_layers = buffer.num_layers
         self.head_dim = buffer.head_dim
@@ -50,6 +50,7 @@ class AttentionVault:
         # Freivalds buffers
         self.freivalds_enabled = freivalds
         self.freivalds_tol = freivalds_tol
+        self.debug_checks = debug_checks
         if self.freivalds_enabled:
             # random vector per head shared across gamma
             self.r_buffer = torch.empty((self.num_heads * num_group, self.head_dim), dtype=buffer.dtype, device=buffer.device if self.use_nccl else 'cpu')
@@ -81,16 +82,24 @@ class AttentionVault:
             if self.freivalds_enabled:
                 print(f"    🔐 [Worker] Sending Freivalds challenge vector r for layer {i+1}")
                 self.r_buffer.uniform_(-1.0, 1.0)
+                if self.debug_checks:
+                    assert self.r_buffer.shape == (self.num_heads * self.num_group, self.head_dim), f"r shape mismatch: {self.r_buffer.shape}"
                 torch.distributed.send(self.r_buffer.contiguous(), 0)
 
             # receive Q state synchronously
             print(f"    📥 [Worker] Receiving Q tensor from master for layer {i+1}")
             torch.distributed.recv(self.q_buffer, 0) # [n=gamma, h, q=1, d]
+            if self.debug_checks:
+                assert self.q_buffer.shape[0] == self.gamma if hasattr(self, 'gamma') else True
+                assert self.q_buffer.shape[1] == self.num_heads * self.num_group, f"Q heads mismatch: {self.q_buffer.shape}"
+                assert self.q_buffer.shape[2] == 1 and self.q_buffer.shape[3] == self.head_dim, f"Q last dims mismatch: {self.q_buffer.shape}"
 
             if self.freivalds_enabled:
                 # receive server-computed projection y = Q @ r
                 print(f"    📥 [Worker] Receiving Freivalds projection y from master for layer {i+1}")
                 torch.distributed.recv(self.y_buffer, 0)
+                if self.debug_checks:
+                    assert self.y_buffer.shape == (self.q_buffer.shape[0], self.q_buffer.shape[1], 1), f"y shape mismatch: {self.y_buffer.shape} vs Q {self.q_buffer.shape}"
 
             # compute local attention
             # (n, h, 1, d) -> (1, h, n, d)
@@ -121,11 +130,13 @@ class AttentionVault:
                     # Compare with received y
                     y_srv = self.y_buffer.to(q_new.device)
                     
-                    print(f"    - y_check shape: {y_check.shape}")
-                    print(f"    - y_srv shape: {y_srv.shape}")
-                    print(f"    - y_check sample: {y_check[0, 0, 0].item()}")
-                    print(f"    - y_srv sample: {y_srv[0, 0, 0].item()}")
+                    if self.debug_checks:
+                        print(f"    - y_check shape: {y_check.shape}")
+                        print(f"    - y_srv shape: {y_srv.shape}")
+                        print(f"    - y_check sample: {y_check[0, 0, 0].item()}")
+                        print(f"    - y_srv sample: {y_srv[0, 0, 0].item()}")
                     
+                    assert y_check.shape == y_srv.shape, f"Freivalds shape mismatch: {y_check.shape} vs {y_srv.shape}"
                     if not torch.allclose(y_check, y_srv, atol=self.freivalds_tol, rtol=0):
                         print(f"    ❌ [Worker] Freivalds verification FAILED for layer {i+1}!")
                         print(f"    - Tolerance: {self.freivalds_tol}")
@@ -286,6 +297,7 @@ def init_worker(
     disable_multiplexing:bool = False,
     freivalds:bool = False,
     freivalds_tol:float = 1e-4,
+    debug_checks:bool = False,
     ):
     # load private metadata pickle
     
@@ -363,7 +375,7 @@ def init_worker(
         mask = torch.as_tensor(mask, device=device)
 
     vault = AttentionVault(buffer_private, meta.gamma, mask, num_group=config.num_attention_heads // config.num_key_value_heads,
-                           freivalds=freivalds, freivalds_tol=freivalds_tol)
+                           freivalds=freivalds, freivalds_tol=freivalds_tol, debug_checks=debug_checks)
 
     # print memory consumption in MB.
     print(f"Worker {user_id} memory consumption: {buffer_private.memory_consumption() / 1024 / 1024:.2f} MB")
@@ -404,7 +416,8 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
          print_idx:int=0,
          disable_multiplexing:bool=False,
          freivalds:bool=False,
-         freivalds_tol:float=1e-4
+         freivalds_tol:float=1e-4,
+         debug_checks:bool=False
          ):
     
     
@@ -413,7 +426,7 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
         return 
     
     if standalone_worker:
-        init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing, freivalds, freivalds_tol)
+        init_worker(states_dir, model, device, num_users, user_id, timeout_sec, disable_multiplexing, freivalds, freivalds_tol, debug_checks)
         return
     
     if distributed_master:
@@ -433,7 +446,8 @@ def main(model="meta-llama/Llama-3.2-3B-Instruct",
             'timeout_sec': timeout_sec,
             'disable_multiplexing': disable_multiplexing,
             'freivalds': freivalds,
-            'freivalds_tol': freivalds_tol
+            'freivalds_tol': freivalds_tol,
+            'debug_checks': debug_checks
             })
         p.start()
         processes.append(p)
