@@ -14,10 +14,10 @@ def freivalds_algorithm(A, B, C, num_checks=10):
     Returns:
     bool: True if A * B = C with high probability, False otherwise.
     """
-    n = A.shape[0]
+    n, m = B.shape[0], B.shape[1]  # Get the dimensions of B
     for _ in range(num_checks):
         # Generate a random vector
-        r = np.random.randint(0, 2, size=(n, 1))
+        r = np.random.randint(0, 2, size=(m, 1))  # Adjust size to match columns of B
         # Compute Br and Cr
         Br = np.dot(B, r)
         Cr = np.dot(C, r)
