@@ -60,57 +60,46 @@ class AttentionVault:
 
     @torch.inference_mode()
     def serve(self):
-        #print('.', end='', flush=True)
-
         for i in range(self.num_layers):
             # receive Q state synchronously
             torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
 
             # Verify the integrity of the received Q using Freivalds' algorithm
-            A = self.q_buffer.cpu().numpy()  # Convert to numpy for Freivalds
-            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()  # k_pvt
-            C = np.matmul(A, B.transpose(0, 1, 3, 2)) / math.sqrt(self.head_dim)
+            A = self.q_buffer.cpu().numpy()
+            B = self.kv_buffer.cache(i, self.num_group)[0].cpu().numpy()
+            
+            # Reshape and transpose matrices for dot product
+            # A: (n, h, 1, d) -> (n*h*1, d)
+            # B: (n, h, kv_seq_len, d) -> (n*h, d, kv_seq_len)
+            A_flat = A.reshape(-1, A.shape[-1])
+            B_transposed = B.transpose(0, 1, 3, 2)
+            B_flat = B_transposed.reshape(-1, B_transposed.shape[-1])
+            
+            # C = A @ B_transposed. C_flat = A_flat @ B_flat
+            C_flat = np.matmul(A_flat, B_flat) / math.sqrt(self.head_dim)
 
-            # Adjust the size of the random vector r to match the dimensions of B
-            _, _, _, d = B.shape  # Get the last dimension size of B
-            r = np.random.randint(0, 2, size=(d, 1))
-
-            # Log the dimensions of A, B, C, and r
-            print(f"Dimensions of A: {A.shape}")
-            print(f"Dimensions of B: {B.shape}")
-            print(f"Dimensions of C: {C.shape}")
-            print(f"Dimensions of r: {r.shape}")
+            # Generate a random vector r with size matching the columns of B_flat
+            n_cols = B_flat.shape[1]
+            r = np.random.randint(0, 2, size=(n_cols, 1))
 
             # Compute Br and Cr
-            Br = np.dot(B.reshape(-1, d), r).reshape(B.shape[:-1])
-            Cr = np.dot(C.reshape(-1, d), r).reshape(-1, 1)
-
-            # Adjust the reshape to match the expected dimensions
-            Cr = Cr.reshape(8, 24, 1)
-
-            # Log the results of Br and Cr
-            print(f"Br: {Br}")
-            print(f"Cr: {Cr}")
+            Br = np.dot(B_flat, r)
+            Cr = np.dot(C_flat, r)
 
             # Compute A(Br)
-            ABr = np.dot(A.reshape(-1, d), Br.reshape(-1, 1)).reshape(A.shape[:-1])
+            ABr = np.dot(A_flat, Br)
 
-            # Log the result of ABr
-            print(f"ABr: {ABr}")
-
-            # Check if ABr equals Cr
-            if not np.array_equal(ABr, Cr):
+            # Check if ABr equals Cr, allowing for small floating-point errors
+            if not np.allclose(ABr, Cr, rtol=1e-5, atol=1e-8):
                 raise ValueError("Integrity check failed for the query tensor Q.")
+            print(f"Integrity check for layer {i} passed.")
 
-            # compute local attention
-            # (n, h, 1, d) -> (1, h, n, d)
+            # Compute local attention
             q_new = self.q_buffer.to(self.kv_buffer.device)
-            k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)  # shape: (n, h, kv_seq_len, d)
+            k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)
 
-            # (n, h, q_len, d) @ (n, h, kv_seq_len, d) -> (n, h, q_len, kv_seq_len)
             score_pvt = torch.matmul(q_new, k_pvt.transpose(2, 3)) / math.sqrt(self.head_dim)
 
-            # apply mask
             if self.attention_mask is not None:
                 score_pvt = score_pvt + self.attention_mask.unsqueeze(1).unsqueeze(1)
 
