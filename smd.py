@@ -83,7 +83,10 @@ class AttentionVault:
 
             # Compute Br and Cr
             Br = np.dot(B.reshape(-1, d), r).reshape(B.shape[:-1])
-            Cr = np.dot(C.reshape(-1, d), r).reshape(C.shape[:-1])
+            Cr = np.dot(C.reshape(-1, d), r).reshape(-1, 1)
+
+            # Adjust the reshape to match the expected dimensions
+            Cr = Cr.reshape(8, 24, 1)
 
             # Log the results of Br and Cr
             print(f"Br: {Br}")
