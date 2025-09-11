@@ -37,9 +37,19 @@ def freivalds_algorithm(A, B, C, num_checks=10):
         # C @ r: (batch, heads, seq_len_q, seq_len_kv) @ (seq_len_kv, 1) -> (batch, heads, seq_len_q, 1)
         C_r = np.matmul(C, r)
 
+        # Debug: Check shapes and values
+        print(f"Debug Freivalds - A_BT_r shape: {A_BT_r.shape}")
+        print(f"Debug Freivalds - C_r shape: {C_r.shape}")
+        print(f"Debug Freivalds - Max diff: {np.max(np.abs(A_BT_r - C_r))}")
+        print(f"Debug Freivalds - Mean A_BT_r: {np.mean(A_BT_r)}, Mean C_r: {np.mean(C_r)}")
+
         # Check if A @ (B^T @ r) equals C @ r with tolerance for floating-point precision
         if not np.allclose(A_BT_r, C_r, rtol=1e-1, atol=1e-4):
+            print(f"Debug Freivalds - FAILED: Max diff = {np.max(np.abs(A_BT_r - C_r))}")
             return False
+        else:
+            print(f"Debug Freivalds - PASSED: Max diff = {np.max(np.abs(A_BT_r - C_r))}")
+            return True
     return True
 
 # Example usage
