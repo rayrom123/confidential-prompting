@@ -123,11 +123,11 @@ def main():
     """Main comparison function"""
 
     # Commands for running experiments
-    master_cmd = "python smd.py --standalone_master --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --num_users 1 --timeout_sec 15 --max_num_tokens 2048 --print_idx 0"
+    master_cmd = "python3 smd.py --standalone_master --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --num_users 1 --timeout_sec 15 --max_num_tokens 2048 --print_idx 0"
 
-    worker_cmd_without = "python smd_without_freivalds.py --standalone_worker --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --user_id 0 --timeout_sec 15"
+    worker_cmd_without = "python3 smd_without_freivalds.py --standalone_worker --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --user_id 0 --timeout_sec 15"
 
-    worker_cmd_with = "python smd.py --standalone_worker --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --user_id 0 --timeout_sec 15"
+    worker_cmd_with = "python3 smd.py --standalone_worker --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --user_id 0 --timeout_sec 15"
 
     print("🧪 STARTING SPD FRAMEWORK COMPARISON TEST")
     print("This will run SPD with and without Freivalds integration")
@@ -136,7 +136,7 @@ def main():
     if not os.path.exists("./states"):
         print("❌ Error: ./states directory not found!")
         print("Please run prompt obfuscation first:")
-        print("python po.py --prompt input.txt --gamma 5 --epsilon 0.1 --temperature 1.0 --prob_dist abs --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --verbose")
+        print("python3 po.py --prompt input.txt --gamma 5 --epsilon 0.1 --temperature 1.0 --prob_dist abs --model meta-llama/Llama-3.2-3B-Instruct --device cuda:0 --states_dir ./states --verbose")
         return
 
     # Run experiment WITHOUT Freivalds
