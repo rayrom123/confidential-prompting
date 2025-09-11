@@ -62,8 +62,9 @@ def run_experiment(version_name, script_name, master_cmd, worker_cmd, timeout=12
             results['master_time'] = end_time - start_time
             results['success'] = True
 
-            print("✅ Experiment completed successfully!"            print(".2f")
-            print(".2f")
+            print("✅ Experiment completed successfully!")
+            print(f"⏱️  Master time: {results['master_time']:.2f}s")
+            print(f"⏱️  Worker time: {results['worker_time']:.2f}s")
 
         except subprocess.TimeoutExpired:
             print(f"⏰ Timeout after {timeout}s")
@@ -85,30 +86,32 @@ def analyze_results(results_without, results_with):
     print(f"{'='*80}")
 
     # Success rate comparison
-    print("
-🎯 SUCCESS COMPARISON:"    print(f"  Without Freivalds: {'✅ SUCCESS' if results_without['success'] else '❌ FAILED'}")
+    print("\n🎯 SUCCESS COMPARISON:")
+    print(f"  Without Freivalds: {'✅ SUCCESS' if results_without['success'] else '❌ FAILED'}")
     print(f"  With Freivalds:    {'✅ SUCCESS' if results_with['success'] else '❌ FAILED'}")
 
     # Performance comparison
     if results_without['success'] and results_with['success']:
-        print("
-⚡ PERFORMANCE COMPARISON:"        print(".2f")
-        print(".2f")
+        print("\n⚡ PERFORMANCE COMPARISON:")
+        print(f"  Without Freivalds: {results_without['master_time']:.2f}s")
+        print(f"  With Freivalds:    {results_with['master_time']:.2f}s")
         overhead = results_with['master_time'] - results_without['master_time']
-        print(".2f")
+        print(f"  Overhead: {overhead:+.2f}s ({overhead/results_without['master_time']*100:+.1f}%)")
 
     # Output comparison
-    print("
-📝 OUTPUT COMPARISON:"    master_out_without = results_without['master_output'][-500:] if results_without['success'] else "N/A"
+    print("\n📝 OUTPUT COMPARISON:")
+    master_out_without = results_without['master_output'][-500:] if results_without['success'] else "N/A"
     master_out_with = results_with['master_output'][-500:] if results_with['success'] else "N/A"
 
-    print("  Without Freivalds output (last 500 chars):"    print(f"    {master_out_without}")
+    print("  Without Freivalds output (last 500 chars):")
+    print(f"    {master_out_without}")
 
-    print("  With Freivalds output (last 500 chars):"    print(f"    {master_out_with}")
+    print("  With Freivalds output (last 500 chars):")
+    print(f"    {master_out_with}")
 
     # Security analysis
-    print("
-🔒 SECURITY ANALYSIS:"    if results_without['success'] and results_with['success']:
+    print("\n🔒 SECURITY ANALYSIS:")
+    if results_without['success'] and results_with['success']:
         if "WARNING" in results_with['worker_output']:
             print("  ⚠️  Freivalds detected potential integrity issues")
         else:
@@ -169,12 +172,12 @@ def main():
 
         f.write("WITHOUT FREIVALDS:\n")
         f.write(f"Success: {results_without['success']}\n")
-        f.write(".2f")
+        f.write(f"Master Time: {results_without['master_time']:.2f}s\n")
         f.write(f"Master Output Length: {len(results_without['master_output'])}\n\n")
 
         f.write("WITH FREIVALDS:\n")
         f.write(f"Success: {results_with['success']}\n")
-        f.write(".2f")
+        f.write(f"Master Time: {results_with['master_time']:.2f}s\n")
         f.write(f"Master Output Length: {len(results_with['master_output'])}\n\n")
 
         f.write("DETAILED OUTPUTS:\n\n")
