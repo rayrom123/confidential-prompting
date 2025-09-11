@@ -61,6 +61,7 @@ def run_experiment(version_name, script_name, master_cmd, worker_cmd, timeout=12
             results['master_output'] = master_output
             results['worker_output'] = worker_output
             results['master_time'] = end_time - start_time
+            results['worker_time'] = end_time - start_time  # Same as master since they run in parallel
             results['success'] = True
 
             print("✅ Experiment completed successfully!")
@@ -71,11 +72,17 @@ def run_experiment(version_name, script_name, master_cmd, worker_cmd, timeout=12
             print(f"⏰ Timeout after {timeout}s")
             master_process.terminate()
             worker_process.terminate()
+            end_time = time.time()
+            results['master_time'] = end_time - start_time
+            results['worker_time'] = end_time - start_time
             results['success'] = False
 
     except Exception as e:
         print(f"❌ Error running {version_name}: {e}")
         results['success'] = False
+        end_time = time.time()
+        results['master_time'] = end_time - start_time if 'start_time' in locals() else 0
+        results['worker_time'] = end_time - start_time if 'start_time' in locals() else 0
 
     return results
 
