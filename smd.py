@@ -97,7 +97,18 @@ class AttentionVault:
             q_new = self.q_buffer.to(self.kv_buffer.device)
             k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)
 
+            # Debug: Check if actual K matches our broadcasted version
+            k_actual = k_pvt.cpu().numpy()
+            print(f"Debug - Actual K shape: {k_actual.shape}")
+            print(f"Debug - Broadcasted B shape: {B_broadcasted.shape}")
+
             score_pvt = torch.matmul(q_new, k_pvt.transpose(2, 3)) / math.sqrt(self.head_dim)
+
+            # Compare actual attention scores with expected
+            score_actual = score_pvt.cpu().numpy()
+            print(f"Debug - Actual attention scores shape: {score_actual.shape}")
+            print(f"Debug - Expected C shape: {C.shape}")
+            print(f"Debug - Score difference: {np.max(np.abs(score_actual - C))}")
 
             if self.attention_mask is not None:
                 score_pvt = score_pvt + self.attention_mask.unsqueeze(1).unsqueeze(1)
