@@ -52,8 +52,9 @@ def run_experiment(version_name, script_name, master_cmd, worker_cmd, timeout=12
         start_time = time.time()
 
         try:
+            # Wait for both processes to complete
             master_output, master_errors = master_process.communicate(timeout=timeout)
-            worker_output, worker_errors = worker_process.communicate(timeout=10)
+            worker_output, worker_errors = worker_process.communicate(timeout=timeout)
 
             end_time = time.time()
 
@@ -146,7 +147,7 @@ def main():
         "smd_without_freivalds.py",
         master_cmd.replace("smd.py", "smd_without_freivalds.py"),
         worker_cmd_without,
-        timeout=60
+        timeout=120
     )
 
     print("\n⏳ Waiting 5 seconds before next test...")
@@ -159,7 +160,7 @@ def main():
         "smd.py",
         master_cmd,
         worker_cmd_with,
-        timeout=60
+        timeout=120
     )
 
     # Analyze and compare results
