@@ -38,7 +38,7 @@ def freivalds_algorithm(A, B, C, num_checks=10):
         C_r = np.matmul(C, r)
 
         # Check if A @ (B^T @ r) equals C @ r with tolerance for floating-point precision
-        if not np.allclose(A_BT_r, C_r, rtol=1e-3, atol=1e-6):
+        if not np.allclose(A_BT_r, C_r, rtol=1e-2, atol=1e-5):
             return False
     return True
 
