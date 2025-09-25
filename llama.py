@@ -1,5 +1,8 @@
 import math
 import time
+import os
+import tempfile
+import subprocess
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -339,7 +342,8 @@ class ConfidentialLlamaAttention(LlamaAttention):
                 buffer_sink_ids: list[int] | None = None,
                 layer_id: int | None = 0,
                 confidential: bool = False,
-                num_users: int = 1
+                num_users: int = 1,
+                verify: bool = False
             ):
         
         logger.start_measure()
@@ -447,6 +451,15 @@ class ConfidentialLlamaAttention(LlamaAttention):
             aa = self.pvt_buffer_gpu if hidden_states.dtype == torch.half else self.pvt_buffer_gpu.float()
 
             max_pvt, sum_pvt, attn_pvt = torch.split(aa, [1, 1, self.head_dim], dim=-1)
+
+            proof_valid = True
+            if verify:
+                try:
+                    proof_valid = _verify_with_gkr(attn_pvt.cpu(), q_new_cpu.cpu())
+                except Exception as e:
+                    # If verification path is misconfigured, fall back to rejecting private attention
+                    proof_valid = False
+
             # combine the public and private states
             alpha = torch.exp(max_pvt - max_pub)
 
@@ -459,7 +472,11 @@ class ConfidentialLlamaAttention(LlamaAttention):
             c_pvt = sum_pvt / (sum_pvt + sum_pub / alpha)
             c_pub = sum_pub / (sum_pub + sum_pvt * alpha)
 
-            attn = c_pvt * attn_pvt + c_pub * attn_pub
+            if proof_valid:
+                attn = c_pvt * attn_pvt + c_pub * attn_pub
+            else:
+                # Reject private contribution if proof invalid
+                attn = attn_pub
             
             
             logger.log_measure('pvt_attention')
@@ -496,7 +513,8 @@ class LlamaDecoderLayer(nn.Module):
             buffer_sink_ids: list[int] | None = None,
             layer_id: int | None = 0,
             confidential: bool = False,
-            num_users: int = 1
+            num_users: int = 1,
+            verify: bool = False
     ) -> torch.Tensor:
         residual = hidden_states
 
@@ -511,7 +529,8 @@ class LlamaDecoderLayer(nn.Module):
             buffer_sink_ids=buffer_sink_ids,
             layer_id=layer_id,
             confidential=confidential,
-            num_users=num_users
+            num_users=num_users,
+            verify=verify
         )
         hidden_states = residual + hidden_states
 
@@ -596,6 +615,7 @@ class LlamaModel(LlamaPreTrainedModel):
             buffer_sink_ids: list[int] | None = None,
             confidential: bool = False,
             num_users: int = 1,
+            verify: bool = False,
     ) -> torch.Tensor:
         batch_size, seq_length = input_ids.shape
 
@@ -642,7 +662,8 @@ class LlamaModel(LlamaPreTrainedModel):
                 buffer_sink_ids=buffer_sink_ids,
                 layer_id=idx,
                 confidential=confidential,
-                num_users=num_users
+                num_users=num_users,
+                verify=verify
             )
 
             hidden_states = layer_outputs
@@ -691,6 +712,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             buffer_sink_ids: list[int] | None = None,
             confidential: bool = False,
             num_users: int = 1,
+            verify: bool = False,
     ) -> torch.Tensor:
         hidden_states = self.model(
             input_ids=input_ids,
@@ -699,7 +721,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
             confidential=confidential,
-            num_users=num_users
+            num_users=num_users,
+            verify=verify
         )
 
         global executor
@@ -710,3 +733,32 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         #executor.shutdown(wait=False)
         
         return logits
+
+
+def _verify_with_gkr(attn_pvt_cpu: torch.Tensor, q_new_cpu: torch.Tensor) -> bool:
+    """Invoke external GKR verifier to validate attn_pvt for given q_new.
+
+    Expects environment variable GKR_VERIFIER_BIN pointing to a verifier executable.
+    Falls back to accepting if not configured.
+    """
+    verifier_bin = os.environ.get('GKR_VERIFIER_BIN')
+    if not verifier_bin or not os.path.exists(verifier_bin):
+        # Not configured: treat as unverified. Return False to be conservative.
+        return False
+
+    with tempfile.TemporaryDirectory() as tmpd:
+        q_path = os.path.join(tmpd, 'q_new.pt')
+        a_path = os.path.join(tmpd, 'attn_pvt.pt')
+        torch.save(q_new_cpu, q_path)
+        torch.save(attn_pvt_cpu, a_path)
+        try:
+            # The verifier should read the two files and exit 0 on success
+            result = subprocess.run(
+                [verifier_bin, '--q', q_path, '--attn', a_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
