@@ -88,6 +88,38 @@ class AttentionVault:
             else:
                 torch.distributed.send(o_buffer.contiguous().cpu(), 0)
 
+            # After sending attn, generate ZKP proof for this layer and send it
+            proof_bytes = b""
+            prover_bin = os.environ.get('GKR_PROVER_BIN')
+            if prover_bin and os.path.exists(prover_bin):
+                try:
+                    with tempfile.TemporaryDirectory() as tmpd:
+                        q_path = os.path.join(tmpd, 'q_new.pt')
+                        a_path = os.path.join(tmpd, 'attn_pvt.pt')
+                        p_path = os.path.join(tmpd, 'proof.bin')
+                        # Save inputs for the prover on CPU
+                        torch.save(self.q_buffer.cpu(), q_path)
+                        torch.save(attn_pvt.cpu(), a_path)
+                        # Run external prover which should write proof to p_path
+                        subprocess.run(
+                            [prover_bin, '--q', q_path, '--attn', a_path, '--out', p_path],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            check=False,
+                        )
+                        if os.path.exists(p_path):
+                            with open(p_path, 'rb') as f:
+                                proof_bytes = f.read()
+                except Exception:
+                    proof_bytes = b""
+
+            # Send proof length and bytes (if any)
+            proof_len = torch.tensor([len(proof_bytes)], dtype=torch.int32)
+            torch.distributed.send(proof_len, 0)
+            if proof_len.item() > 0:
+                proof_tensor = torch.tensor(list(proof_bytes), dtype=torch.uint8)
+                torch.distributed.send(proof_tensor, 0)
+
 class StreamPrinter:
 
     def __init__(self):

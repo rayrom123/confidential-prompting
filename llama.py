@@ -452,10 +452,26 @@ class ConfidentialLlamaAttention(LlamaAttention):
 
             max_pvt, sum_pvt, attn_pvt = torch.split(aa, [1, 1, self.head_dim], dim=-1)
 
+            # Receive ZKP proof(s) from prover(s)
+            proof_blob: bytes | None = None
+            if verify:
+                try:
+                    batch_per_user = bsz // num_users if num_users > 0 else bsz
+                    for _ in range(num_users):
+                        len_tensor = torch.empty((1,), dtype=torch.int32)
+                        torch.distributed.recv(len_tensor, src=None)
+                        ln = int(len_tensor.item())
+                        if ln > 0:
+                            buf = torch.empty((ln,), dtype=torch.uint8)
+                            torch.distributed.recv(buf, src=None)
+                            proof_blob = bytes(buf.tolist())  # keep last received if multiple
+                except Exception:
+                    proof_blob = None
+
             proof_valid = True
             if verify:
                 try:
-                    proof_valid = _verify_with_gkr(attn_pvt.cpu(), q_new_cpu.cpu())
+                    proof_valid = _verify_with_gkr(attn_pvt.cpu(), q_new_cpu.cpu(), proof_blob)
                 except Exception as e:
                     # If verification path is misconfigured, fall back to rejecting private attention
                     proof_valid = False
@@ -735,7 +751,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         return logits
 
 
-def _verify_with_gkr(attn_pvt_cpu: torch.Tensor, q_new_cpu: torch.Tensor) -> bool:
+def _verify_with_gkr(attn_pvt_cpu: torch.Tensor, q_new_cpu: torch.Tensor, proof_blob: bytes | None = None) -> bool:
     """Invoke external GKR verifier to validate attn_pvt for given q_new.
 
     Expects environment variable GKR_VERIFIER_BIN pointing to a verifier executable.
@@ -749,12 +765,22 @@ def _verify_with_gkr(attn_pvt_cpu: torch.Tensor, q_new_cpu: torch.Tensor) -> boo
     with tempfile.TemporaryDirectory() as tmpd:
         q_path = os.path.join(tmpd, 'q_new.pt')
         a_path = os.path.join(tmpd, 'attn_pvt.pt')
+        p_path = os.path.join(tmpd, 'proof.bin')
         torch.save(q_new_cpu, q_path)
         torch.save(attn_pvt_cpu, a_path)
+        if proof_blob is not None:
+            try:
+                with open(p_path, 'wb') as f:
+                    f.write(proof_blob)
+            except Exception:
+                p_path = None
         try:
             # The verifier should read the two files and exit 0 on success
+            cmd = [verifier_bin, '--q', q_path, '--attn', a_path]
+            if proof_blob is not None and p_path and os.path.exists(p_path):
+                cmd.extend(['--proof', p_path])
             result = subprocess.run(
-                [verifier_bin, '--q', q_path, '--attn', a_path],
+                cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
                 check=False,
