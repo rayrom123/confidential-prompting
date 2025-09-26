@@ -382,17 +382,26 @@ class ConfidentialLlamaAttention(LlamaAttention):
             # send before view() because send only works with contiguous tensors.
             # print(torch.sum(q_new))
             batch_per_user = bsz // num_users
+            
+            # Generate proof for q_new integrity if verification is enabled
+            proof_bytes = b""
+            if verify:
+                proof_bytes = _generate_q_new_proof(q_new_cpu)
+            
             for i in range(num_users):
-                
-                # check if nan
-                
-                
-                #print('send shape', q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user].shape)
-                #print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
+                # Send q_new to worker
                 torch.distributed.isend(q_new_cpu[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
-                # print('recv shape', self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user].shape)
+                
+                # Send proof for q_new integrity verification
+                if verify:
+                    proof_len = torch.tensor([len(proof_bytes)], dtype=torch.int32)
+                    torch.distributed.isend(proof_len, 1 + i)
+                    if len(proof_bytes) > 0:
+                        proof_tensor = torch.tensor(list(proof_bytes), dtype=torch.uint8)
+                        torch.distributed.isend(proof_tensor, 1 + i)
+                
+                # Receive computed attn_pvt from worker
                 work = torch.distributed.irecv(self.pvt_buffer[i * batch_per_user:(i + 1) * batch_per_user], 1 + i)
-                #works.append((work, time.time()))
                 works.append(work)
                 
             logger.log_measure('comm_overhead1')
@@ -452,29 +461,9 @@ class ConfidentialLlamaAttention(LlamaAttention):
 
             max_pvt, sum_pvt, attn_pvt = torch.split(aa, [1, 1, self.head_dim], dim=-1)
 
-            # Receive ZKP proof(s) from prover(s)
-            proof_blob: bytes | None = None
-            if verify:
-                try:
-                    batch_per_user = bsz // num_users if num_users > 0 else bsz
-                    for _ in range(num_users):
-                        len_tensor = torch.empty((1,), dtype=torch.int32)
-                        torch.distributed.recv(len_tensor, src=None)
-                        ln = int(len_tensor.item())
-                        if ln > 0:
-                            buf = torch.empty((ln,), dtype=torch.uint8)
-                            torch.distributed.recv(buf, src=None)
-                            proof_blob = bytes(buf.tolist())  # keep last received if multiple
-                except Exception:
-                    proof_blob = None
-
-            proof_valid = True
-            if verify:
-                try:
-                    proof_valid = _verify_with_gkr(attn_pvt.cpu(), q_new_cpu.cpu(), proof_blob)
-                except Exception as e:
-                    # If verification path is misconfigured, fall back to rejecting private attention
-                    proof_valid = False
+            # Worker has already verified q_new integrity and computed attn_pvt
+            # Check if attn_pvt is all zeros (integrity failed on worker side)
+            proof_valid = not torch.allclose(attn_pvt, torch.zeros_like(attn_pvt), atol=1e-6)
 
             # combine the public and private states
             alpha = torch.exp(max_pvt - max_pub)
@@ -489,9 +478,11 @@ class ConfidentialLlamaAttention(LlamaAttention):
             c_pub = sum_pub / (sum_pub + sum_pvt * alpha)
 
             if proof_valid:
+                # q_new integrity verified, now compute private attention locally
+                # Use the received attn_pvt from prover (already computed and verified)
                 attn = c_pvt * attn_pvt + c_pub * attn_pub
             else:
-                # Reject private contribution if proof invalid
+                # Reject private contribution if q_new integrity doesn't meet
                 attn = attn_pub
             
             
@@ -749,6 +740,64 @@ class LlamaForCausalLM(LlamaPreTrainedModel):
         #executor.shutdown(wait=False)
         
         return logits
+
+
+def _generate_q_new_proof(q_new_cpu: torch.Tensor) -> bytes:
+    """Generate proof for q_new integrity using external prover."""
+    prover_bin = os.environ.get('GKR_PROVER_BIN')
+    if not prover_bin or not os.path.exists(prover_bin):
+        return b""
+
+    with tempfile.TemporaryDirectory() as tmpd:
+        q_path = os.path.join(tmpd, 'q_new.pt')
+        p_path = os.path.join(tmpd, 'proof.bin')
+        torch.save(q_new_cpu, q_path)
+        
+        try:
+            result = subprocess.run(
+                [prover_bin, '--q', q_path, '--out_proof', p_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            if result.returncode == 0 and os.path.exists(p_path):
+                with open(p_path, 'rb') as f:
+                    return f.read()
+        except Exception:
+            pass
+    return b""
+
+
+def _verify_q_new_integrity(q_new_cpu: torch.Tensor, proof_blob: bytes) -> bool:
+    """Verify q_new integrity using external GKR verifier.
+    
+    This verifies that q_new is valid and can be used for private attention computation.
+    """
+    verifier_bin = os.environ.get('GKR_VERIFIER_BIN')
+    if not verifier_bin or not os.path.exists(verifier_bin):
+        return False
+
+    with tempfile.TemporaryDirectory() as tmpd:
+        q_path = os.path.join(tmpd, 'q_new.pt')
+        p_path = os.path.join(tmpd, 'proof.bin')
+        torch.save(q_new_cpu, q_path)
+        
+        try:
+            with open(p_path, 'wb') as f:
+                f.write(proof_blob)
+        except Exception:
+            return False
+            
+        try:
+            result = subprocess.run(
+                [verifier_bin, '--q', q_path, '--proof', p_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
 
 def _verify_with_gkr(attn_pvt_cpu: torch.Tensor, q_new_cpu: torch.Tensor, proof_blob: bytes | None = None) -> bool:

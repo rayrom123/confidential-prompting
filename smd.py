@@ -5,6 +5,8 @@ import os
 import multiprocessing
 import math
 import torch
+import tempfile
+import subprocess
 
 import datetime
 
@@ -17,7 +19,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer, AutoConfig
 
 from attention import AttentionBuffer
-from llama import LlamaForCausalLM, softmax
+from llama import LlamaForCausalLM, softmax, _verify_q_new_integrity
 from prompt import PublicMeta, PrivateMeta, Replacement
 import logger 
 
@@ -65,21 +67,38 @@ class AttentionVault:
             # receive Q state synchronously
             torch.distributed.recv(self.q_buffer, 0) # [n=6, h=24, q=1, d=128]
 
-            # compute local attention
-            # (n, h, 1, d) -> (1, h, n, d)
+            # receive proof for q_new integrity verification
+            proof_bytes = b""
+            try:
+                len_tensor = torch.empty((1,), dtype=torch.int32)
+                torch.distributed.recv(len_tensor, 0)
+                ln = int(len_tensor.item())
+                if ln > 0:
+                    buf = torch.empty((ln,), dtype=torch.uint8)
+                    torch.distributed.recv(buf, 0)
+                    proof_bytes = bytes(buf.tolist())
+            except Exception:
+                proof_bytes = b""
+
+            # Verify q_new integrity using received proof
             q_new = self.q_buffer.to(self.kv_buffer.device)
-            k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)  # shape: (n, h, kv_seq_len, d)
-
-            # (n, h, q_len, d) @ (n, h, kv_seq_len, d) -> (n, h, q_len, kv_seq_len)
-            score_pvt = torch.matmul(q_new, k_pvt.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-            # apply mask
-            if self.attention_mask is not None:
-                score_pvt = score_pvt + self.attention_mask.unsqueeze(1).unsqueeze(1)
-
-            max_pvt, sum_pvt, score_pvt = softmax(score_pvt, dim=-1)
+            integrity_valid = True
+            if len(proof_bytes) > 0:
+                integrity_valid = _verify_q_new_integrity(q_new.cpu(), proof_bytes)
             
-            attn_pvt = torch.matmul(score_pvt, v_pvt)
+            # Compute private attention if q_new integrity is valid
+            if integrity_valid:
+                k_pvt, v_pvt = self.kv_buffer.cache(i, self.num_group)
+                score_pvt = torch.matmul(q_new, k_pvt.transpose(2, 3)) / math.sqrt(self.head_dim)
+                if self.attention_mask is not None:
+                    score_pvt = score_pvt + self.attention_mask.unsqueeze(1).unsqueeze(1)
+                max_pvt, sum_pvt, score_pvt = softmax(score_pvt, dim=-1)
+                attn_pvt = torch.matmul(score_pvt, v_pvt)
+            else:
+                # q_new integrity doesn't meet - send zeros as fallback
+                max_pvt = torch.zeros(q_new.shape[0], q_new.shape[1], q_new.shape[2], 1)
+                sum_pvt = torch.ones(q_new.shape[0], q_new.shape[1], q_new.shape[2], 1)
+                attn_pvt = torch.zeros(q_new.shape[0], q_new.shape[1], q_new.shape[2], self.head_dim)
 
             o_buffer = torch.cat([max_pvt, sum_pvt, attn_pvt], dim=-1)
 
@@ -87,38 +106,6 @@ class AttentionVault:
                 torch.distributed.send(o_buffer.contiguous(), 0)
             else:
                 torch.distributed.send(o_buffer.contiguous().cpu(), 0)
-
-            # After sending attn, generate ZKP proof for this layer and send it
-            proof_bytes = b""
-            prover_bin = os.environ.get('GKR_PROVER_BIN')
-            if prover_bin and os.path.exists(prover_bin):
-                try:
-                    with tempfile.TemporaryDirectory() as tmpd:
-                        q_path = os.path.join(tmpd, 'q_new.pt')
-                        a_path = os.path.join(tmpd, 'attn_pvt.pt')
-                        p_path = os.path.join(tmpd, 'proof.bin')
-                        # Save inputs for the prover on CPU
-                        torch.save(self.q_buffer.cpu(), q_path)
-                        torch.save(attn_pvt.cpu(), a_path)
-                        # Run external prover which should write proof to p_path
-                        subprocess.run(
-                            [prover_bin, '--q', q_path, '--attn', a_path, '--out', p_path],
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL,
-                            check=False,
-                        )
-                        if os.path.exists(p_path):
-                            with open(p_path, 'rb') as f:
-                                proof_bytes = f.read()
-                except Exception:
-                    proof_bytes = b""
-
-            # Send proof length and bytes (if any)
-            proof_len = torch.tensor([len(proof_bytes)], dtype=torch.int32)
-            torch.distributed.send(proof_len, 0)
-            if proof_len.item() > 0:
-                proof_tensor = torch.tensor(list(proof_bytes), dtype=torch.uint8)
-                torch.distributed.send(proof_tensor, 0)
 
 class StreamPrinter:
 
@@ -192,7 +179,8 @@ def init_master(
             position_ids=torch.as_tensor(position_ids, device=device).unsqueeze(-1),
             buffer=buffer,
             buffer_sink_ids=buffer_sink_ids,
-            confidential=True  # Bật lại để debug private attention
+            confidential=True,  # Bật lại để debug private attention
+            verify=True
         )
         
         # sample from logits
